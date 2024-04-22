@@ -3,7 +3,8 @@ from dataclasses import dataclass
 import json
 
 
-# "gates"
+# E.g. "gates": [
+# { "op": "AMul", "lh_in": 6, "rh_in": 22, "out": 24 },
 @dataclass(frozen=True)
 class AGate:
   # just a serial id
@@ -18,18 +19,44 @@ class AGate:
   out: int
 
 
-# "nodes"
+# E.g. "signals": {
+#   "136": { "name": "TFMul.in[0][0]", "value": null },
+# }
+@dataclass(frozen=True)
+class ASignal:
+  signal_id: int
+  name: str
+  value: int
+
+
+# "nodes": {
+#   "762": { "is_const": false, "is_out": true, "signals": [496] },
+# }
 @dataclass(frozen=True)
 class ANode:
   id: int
-  # not used
+  # signal ids that this node is connected to
   signals: list[int]
-  # wire names
-  names: list[str]
   # is node a constant
   is_const: bool
-  # if the node is a constant, this is the value
-  const_value: int
+  is_out: bool
+
+
+# node.is_out=false
+# [5]: "TFLog.e_until[0]"
+# [0,3,51]
+#   - 0: "0.in[0][0]"
+#   - 3: "TFLog.in[0][0]"
+#   - 51: "TFLog.x"
+# [397]: "TFLog.x_over_b_minus_one_exp[0]"
+#
+# Plan: use the old way to determine
+#   - inputs/outputs: old way. FIXME: need to figure out how `is_out` is determined
+#   - constants: use signal.value != null
+
+
+# signal["1"]: { "name": "0.tf_log_1_out[0]", "value": null },
+# nodes["902"]: { "is_const": false, "is_out": true, "signals": [1, 621, 4, 2] },
 
 
 def parse_arithc_json(
@@ -45,6 +72,8 @@ def _parse_arithc_json(arithc_path: str):
   with open(arithc_path) as f:
     data = json.load(f)
 
+  # signal_id -> ASignal
+  asignals: dict[int, ASignal] = {}
   # node_id -> ANode
   anodes: dict[int, ANode] = {}
   # constant values: node_id -> const_value
@@ -58,28 +87,70 @@ def _parse_arithc_json(arithc_path: str):
   # gate_id -> AGate
   agates: dict[int, AGate] = {}
 
-  for node in data['nodes']:
-    anode = ANode(node['id'], node['signals'], node['names'], node['is_const'], node['const_value'])
+  for k, v in data['signals'].items():
+    signal_id = int(k)
+    signal_name = v['name']
+    signal_value = int(v['value']) if v['value'] is not None else None
+    asignal = ASignal(signal_id, signal_name, signal_value)
+    asignals[signal_id] = asignal
+
+  for k, v in data['nodes'].items():
+    node_id = int(k)
+    node_is_const = v['is_const']
+    node_is_out = v['is_out']
+    node_signal_ids = list(map(int, v['signals']))
+
+    anode = ANode(id=node_id, signals=node_signal_ids, is_const=node_is_const, is_out=node_is_out)
     anodes[anode.id] = anode
+
+  for gate_id, gate in enumerate(data['gates']):
+    gate_type = gate['op']
+    lh_input_node_id = gate['lh_in']
+    rh_input_node_id = gate['rh_in']
+    output_node_id = gate['out']
+    agate = AGate(id=gate_id, type=gate_type, lhs=lh_input_node_id, rhs=rh_input_node_id, out=output_node_id)
+    agates[gate_id] = agate
+
+  # find
+  # 1. highest level inputs
+  #   - signals name starts with "0."
+  # 2. highest level outputs
+  # 3. constant values for each node
+
+  for node_id, anode in anodes.items():
     # FIXME: this seems not a correct way to determine input/output
     # Now we assume if the node name starts with "0.", it's a highest level signal.
     # If there are other information in the future, we should use that instead.
-    for node_name in anode.names:
-      if node_name.startswith("0."):
+    signal_ids = anode.signals
+    node_signals = [asignals[sid] for sid in signal_ids]
+
+    # Iterate through all signals of this node to find the highest level inputs and outputs
+    for _signal in node_signals:
+      signal_name = _signal.name
+      if signal_name.startswith("0."):
         # Assuming inputs are always before outputs
         # Only set it if it's not already set for inputs, to avoid names being overwritten
         if anode.id not in main_inputs:
-          main_inputs[anode.id] = node_name[2:]
+          main_inputs[anode.id] = signal_name[2:]
         # It's fine for output to be overwritten
-        main_outputs[anode.id] = node_name[2:]
-    if anode.is_const:
-      const_values[anode.id] = anode.const_value
-      const_names[anode.id] = node_name
+        main_outputs[anode.id] = signal_name[2:]
 
-  for gate in data['gates']:
-    gate_id = gate['id']
-    agate = AGate(gate_id, gate['gate_type'], gate['lh_input'], gate['rh_input'], gate['output'])
-    agates[gate_id] = agate
+    # Iterate through all signals of this node to find the constant values
+    # FIXME: are these sanity checks correct?
+    # Sanity check 1: if a node is a constant, all its signals must have value != null
+    if anode.is_const:
+      is_one_signal_has_value = any(_signal.value is not None for _signal in node_signals)
+      if not is_one_signal_has_value:
+        raise Exception(f"Constant node has no signal with value not None: {anode=}")
+    # Sanity check 2: there can be only one signal with value != null
+    is_multiple_signals_have_value = sum(1 for _signal in node_signals if _signal.value is not None) > 1
+    if is_multiple_signals_have_value:
+      raise Exception(f"Node has multiple signals with value not None: {anode=}")
+    # If any of the node's signals has value, set it as the node's constant value
+    for _signal in node_signals:
+      if _signal.value is not None:
+        const_values[anode.id] = _signal.value
+        const_names[anode.id] = signal_name
 
   # Clean up `main_inputs` and `main_outputs` to make sure they only contain their corresponding wires
   # gid = 0...ngate-1
@@ -100,8 +171,8 @@ def _parse_arithc_json(arithc_path: str):
   # Now we get the correct `main_inputs` and `main_outputs`
   print("!@# after pop: main_inputs= ", main_inputs)
   print("!@# after pop: main_outputs=", main_outputs)
-  print("!@# after pop: const_names=  ", const_names)
-  print("!@# after pop: const_values= ", const_values)
+  const_name_to_values = {const_names[node_id]: const_value for node_id, const_value in const_values.items()}
+  print("!@# after pop: const name to values=  ", const_name_to_values)
   return anodes, agates, main_inputs, main_outputs, const_names, const_values
 
 
@@ -294,8 +365,9 @@ def _generate_bristol_and_circuit_info(
       rid_to_iid = {node.rid: node.iid for node in tt.sorted_wires}
       # Map input name to wire index in MP-SPDZ circuit (including constant wires)
       input_name_to_wire_index = {
-        main_inputs[node_rid]: rid_to_iid[node_rid]
-        for node_rid in self.leaves if node_rid not in const_values
+        input_name: rid_to_iid[node_rid]
+        # for node_rid in self.leaves if node_rid not in const_values
+        for node_rid, input_name in main_inputs.items()
       }
 
       # FIXME: outputs without a gate are skipped (i.e. direct assigned from input or a constant, etc)
@@ -336,10 +408,44 @@ def _generate_bristol_and_circuit_info(
 
 
 def main():
-  circuit_name = "sum"
-  arithc_path = Path(f"{circuit_name}.json")
-  bristol_circuit_output_path = Path(f"{circuit_name}.txt")
-  circuit_info_filepath = Path(f"{circuit_name}.circuit_info.json")
+  project_root = Path(__file__).resolve().parent
+  arithc_path = project_root / "output-path" / "circuit.json"
+
+  with open(arithc_path) as f:
+    data = json.load(f)
+
+  # skip `node_count` for now. It should subtract the number of removed nodes?
+  try:
+    node_count = data['node_count']
+    print("!@# node_count=", node_count)
+  except KeyError:
+    pass
+
+  try:
+    _vars = data['vars']
+    print("!@# len(vars)=", len(_vars))
+  except KeyError:
+    pass
+  try:
+    signals = data['signals']
+    print("!@# len(signals)=", len(signals))
+  except KeyError:
+    pass
+
+  try:
+    nodes = data['nodes']
+    print("!@# len(nodes)=", len(nodes))
+  except KeyError:
+    pass
+
+  try:
+    gates = data['gates']
+    print("!@# len(gates)=", len(gates))
+  except KeyError:
+    pass
+
+  bristol_circuit_output_path = arithc_path.parent / f"{arithc_path.stem}.txt"
+  circuit_info_filepath = arithc_path.parent / f"{arithc_path.stem}.circuit_info.json"
 
   parse_arithc_json(arithc_path, bristol_circuit_output_path, circuit_info_filepath)
 
