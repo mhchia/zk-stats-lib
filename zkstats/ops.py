@@ -347,7 +347,7 @@ class Stdev(Operation):
 
 
 class Variance(Operation):
-    def __init__(self, x: torch.Tensor, error: float, precal_witness:dict = None, op_dict:dict = {}):
+    def __init__(self, x: torch.Tensor, error: float, precal_witness:dict = None, op_dict: Optional[dict[str, int]] = None):
         if precal_witness is None:
             x_1d = to_1d(x)
             x_1d = x_1d[x_1d!=MagicNumber]
@@ -355,7 +355,7 @@ class Variance(Operation):
             result = torch.var(x_1d, correction = 1)
             super().__init__(result, error)
         else:
-            if 'Variance' not in op_dict:
+            if op_dict is None:
                 super().__init__(torch.tensor(precal_witness['Variance_0'][0]), error)
                 self.data_mean = torch.nn.Parameter(data = torch.tensor(precal_witness['Variance_0'][1]), requires_grad=False)
             else:
@@ -364,7 +364,7 @@ class Variance(Operation):
 
 
     @classmethod
-    def create(cls, x: list[torch.Tensor], error: float, precal_witness:dict = None, op_dict:dict = {}) -> 'Variance':
+    def create(cls, x: list[torch.Tensor], error: float, precal_witness:dict = None, op_dict: Optional[dict[str, int]] = None) -> 'Variance':
         return cls(x[0], error, precal_witness, op_dict)
 
     def ezkl(self, x: list[torch.Tensor]) -> IsResultPrecise:
